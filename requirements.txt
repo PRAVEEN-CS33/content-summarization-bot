@@ -1,0 +1,30 @@
+# ── OpenAI ChatGPT API ────────────────────────────────────────────────────────
+openai
+
+# ── Google Gemini API ─────────────────────────────────────────────────────────
+google-generativeai
+python-telegram-bot[job-queue]
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+APScheduler==3.10.4
+
+# ── RSS / HTTP ────────────────────────────────────────────────────────────────
+feedparser==6.0.11
+requests==2.31.0
+httpx==0.27.0
+
+# ── Audio Download + Transcription ────────────────────────────────────────────
+yt-dlp>=2024.3.10
+faster-whisper==1.0.3          # CPU-friendly Whisper backend
+
+# ── Article Extraction ────────────────────────────────────────────────────────
+trafilatura==1.9.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+# sqlite3 is built into Python — no package needed
+
+# ── Config ────────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+
+# ── Logging / utilities ───────────────────────────────────────────────────────
+colorlog==6.8.2
