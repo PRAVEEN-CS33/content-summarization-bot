@@ -3,6 +3,7 @@ main.py — Entry point. Boots DB, scheduler, and Telegram bot together.
 """
 import asyncio
 import logging
+import os
 import signal
 import sys
 
@@ -10,6 +11,41 @@ from utils.logger import setup_logging
 setup_logging("INFO")
 
 logger = logging.getLogger(__name__)
+
+# ── PID lock: prevent two bot instances from fighting over the Telegram token ──
+# Telegram only allows one getUpdates polling session per token. A second
+# instance causes: "Conflict: terminated by other getUpdates request".
+_PID_FILE = os.path.join(os.path.dirname(__file__), "data", "bot.pid")
+
+def _acquire_pid_lock():
+    """Write our PID to a lock file. Exit immediately if another instance is running."""
+    os.makedirs(os.path.dirname(_PID_FILE), exist_ok=True)
+    if os.path.exists(_PID_FILE):
+        try:
+            old_pid = int(open(_PID_FILE).read().strip())
+            # Check if that process is actually alive
+            os.kill(old_pid, 0)
+            # It's alive — refuse to start
+            print(
+                f"\n❌ Another bot instance is already running (PID {old_pid}).\n"
+                f"   Kill it first:  kill {old_pid}\n"
+                f"   Or force-clear: rm {_PID_FILE}\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except (ValueError, ProcessLookupError):
+            # Stale PID file — previous run crashed without cleanup
+            logger.warning("Stale PID file found (process gone). Removing and continuing.")
+
+    with open(_PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+def _release_pid_lock():
+    """Remove the PID file on clean shutdown."""
+    try:
+        os.remove(_PID_FILE)
+    except FileNotFoundError:
+        pass
 
 
 def check_prerequisites():
@@ -36,6 +72,7 @@ def check_prerequisites():
 
 
 async def main():
+    _acquire_pid_lock()
     check_prerequisites()
 
     # Initialise database
@@ -83,6 +120,7 @@ async def main():
     await app.updater.stop()
     await app.stop()
     await app.shutdown()
+    _release_pid_lock()
     logger.info("Goodbye.")
 
 

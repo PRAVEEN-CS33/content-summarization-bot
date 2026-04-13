@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 BASE_DIR = Path(__file__).parent
 
@@ -18,7 +18,7 @@ DATABASE_PATH = BASE_DIR / "data" / "summarizer.db"
 
 # ── Google Gemini API ─────────────────────────────────────────────────────────
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "gemini-2-flash")  # fast + capable
+GEMINI_MODEL     = os.getenv("GEMINI_MODEL", "")  # fast + capable
 # Options: "gemini-2.0-flash" | "gemini-1.5-pro" | "gemini-1.5-flash"
 
 # ── Whisper (local transcription) ─────────────────────────────────────────────

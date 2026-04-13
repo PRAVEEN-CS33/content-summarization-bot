@@ -121,15 +121,22 @@ def fetch_and_queue_source(source: dict) -> Dict[str, int]:
         return stats
 
     logger.info("Fetched %d entries from [%s] %s", len(feed.entries), source["type"], source["name"])
+    
+    # If it's a Google Alert, it might be a single entry containing multiple sub-items.
+    # However, usually we want to process each entry in the feed.
     entries = feed.entries[:config.MAX_ITEMS_PER_RUN]
 
     for entry in entries:
-        entry_id = _normalize_entry_id(entry)
         title    = getattr(entry, "title", "Untitled")
         raw_link = getattr(entry, "link", "")
-        link     = _unwrap_google_url(raw_link)   # unwrap google redirect
+        link     = _unwrap_google_url(raw_link)
+        
+        # Google Alert entries often have titles that are just snippets or IDs.
+        # If the title looks like a GUID or a hash, we'll try to refine it later in pipeline.
+        
+        entry_id = _normalize_entry_id(entry)
         pub_date = _parse_date(entry)
-        content  = _get_entry_content(entry)       # works for Google Alerts
+        content  = _get_entry_content(entry)
 
         if db.item_exists(source_id, entry_id):
             stats["skipped"] += 1

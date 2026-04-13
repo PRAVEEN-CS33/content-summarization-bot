@@ -43,21 +43,18 @@ CONTENT:
 {content}
 
 ---
-Produce the summary in this EXACT format (no deviations, no extra sections):
-
-<b>{title}</b>
+Produce the summary in this EXACT format (no deviations, no extra sections, no asterisks for bolding):
 
 <b>OVERVIEW</b>
 [2-3 sentence high-level summary]
 
 <b>SUMMARY</b>
 ➡️ [Key points / takeaways]
+
+➡️ [Key points / takeaways]
 ......
 
-<b>SOURCE LINK</b>
-[link]
-
-Keep it factual and dense. """
+Keep it factual and dense. Do NOT include the title or the source link in your output. """
 
 
 # ── Core API call ─────────────────────────────────────────────────────────────
@@ -153,23 +150,18 @@ def summarize(
 
 URL_PROMPT = """You are given a direct link to a piece of content (a YouTube video, podcast episode, or similar).
 
-Please access the URL and produce a structured summary in this EXACT format (no deviations, no extra sections):
-
-<b>{title}</b>
+Please access the URL and produce a structured summary in this EXACT format (no deviations, no extra sections, no asterisks for bolding):
 
 <b>OVERVIEW</b>
 [2-3 sentence high-level summary of the content]
 
 <b>SUMMARY</b>
-➡️ [Key point / takeaway 1]
-➡️ [Key point / takeaway 2]
-➡️ [Key point / takeaway 3]
-➡️ [Key point / takeaway 4 if relevant]
+➡️ [Key points / takeaways]
 
-<b>SOURCE LINK</b>
-[link]
+➡️ [Key points / takeaways]
+......
 
-Keep it factual and dense.
+Keep it factual and dense. Do NOT include the title or the source link in your output.
 
 URL: {url}
 Title (hint): {title}

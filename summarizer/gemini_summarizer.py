@@ -1,8 +1,6 @@
 """
 summarizer/gemini_summarizer.py — Summarize content using Google Gemini API.
 
-Mirrors the openai_summarizer interface exactly so callers can swap between them.
-
 Recommended models:
   - gemini-2.0-flash    ← DEFAULT: very fast, free tier generous
   - gemini-1.5-pro      ← Higher quality, larger context window
@@ -14,25 +12,22 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Lazy-initialised Gemini client
-_gemini_model = None
+# Lazy-initialized Gemini client
+_gemini_client = None
 
 
-def _get_model():
-    global _gemini_model
-    if _gemini_model is None:
+def _get_client():
+    global _gemini_client
+    if _gemini_client is None:
         if not config.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set in your .env file")
-        import google.generativeai as genai
-        genai.configure(api_key=config.GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel(
-            model_name=config.GEMINI_MODEL,
-            generation_config={
-                "temperature": 0.3,
-                "top_p": 0.9,
-            },
+        from google import genai
+        from google.genai import types
+        _gemini_client = genai.Client(
+            api_key=config.GEMINI_API_KEY,
+            http_options=types.HttpOptions(api_version='v1beta')
         )
-    return _gemini_model
+    return _gemini_client
 
 
 # ── Prompt Templates ──────────────────────────────────────────────────────────
@@ -52,39 +47,33 @@ CONTENT:
 {content}
 
 ---
-Produce the summary in this EXACT format (no deviations, no extra sections):
-
-<b>{title}</b>
+Produce the summary in this EXACT format (no deviations, no extra sections, no asterisks for bolding):
 
 <b>OVERVIEW</b>
 [2-3 sentence high-level summary]
 
 <b>SUMMARY</b>
 ➡️ [Key points / takeaways]
+
+➡️ [Key points / takeaways]
 ......
 
-<b>SOURCE LINK</b>
-[link]
+Keep it factual and dense. Do NOT include the title or the source link in your output. """
 
-Keep it factual and dense. """
+URL_PROMPT = """Provide a detailed summary of this video/podcast (a YouTube video, podcast episode, or similar).
 
-URL_PROMPT = """You are given a direct link to a piece of content (a YouTube video, podcast episode, or similar).
-
-Please access the URL and produce a structured summary in this EXACT format (no deviations, no extra sections):
-
-<b>{title}</b>
+Please access the URL and produce a structured summary in this EXACT format (no deviations, no extra sections, no asterisks for bolding):
 
 <b>OVERVIEW</b>
 [2-3 sentence high-level summary of the content]
 
 <b>SUMMARY</b>
 ➡️ [Key points / takeaways]
+
+➡️ [Key points / takeaways]
 ......
 
-<b>SOURCE LINK</b>
-[link]
-
-Keep it factual and dense.
+Keep it factual and dense. Do NOT include the title or the source link in your output.
 
 URL: {url}
 Title (hint): {title}
@@ -98,16 +87,23 @@ IMPORTANT: If you are unable to access or retrieve the content from this URL, re
 def _call_gemini(prompt: str) -> Optional[str]:
     """Send a prompt to Gemini and return the response text."""
     try:
-        model = _get_model()
+        client = _get_client()
         full_prompt = f"{SYSTEM_INSTRUCTION}\n\n{prompt}"
-        response = model.generate_content(full_prompt)
+        response = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=full_prompt,
+            config={
+                "temperature": 0.3,
+                "top_p": 0.9,
+            }
+        )
 
         # Extract text from response
         text = response.text.strip() if hasattr(response, "text") else ""
         if not text:
             # Try candidates fallback
             if response.candidates:
-                text = response.candidates[0].content.parts[0].text.strip()
+                text = "".join(part.text for part in response.candidates[0].content.parts).strip()
 
         if text:
             logger.info("Gemini response: %d chars", len(text))
@@ -164,16 +160,68 @@ def summarize_from_url(
     URL-first summarization: pass the URL directly to Gemini.
     Gemini will attempt to access and summarize the linked content.
     Returns None if Gemini cannot access the URL (caller falls back to Whisper).
+
+    FIXED: Raises ValueError immediately for Spotify episode URLs.
+    Spotify audio is DRM-protected; Gemini cannot access it and will hallucinate.
+    The correct path is: Whisper transcription → summarize(text=...).
     """
     if not url:
         return None
 
+    # FIXED: Hard guard against Spotify episode URLs being passed here.
+    # If this assertion fires it means on_demand.py regressed and is calling
+    # Gemini URL-first for a Spotify episode — which must never happen.
+    import re as _re
+    if _re.search(r"open\.spotify\.com/episode/", url, _re.IGNORECASE):
+        raise ValueError(
+            "Spotify URLs must be transcribed first. Call summarize(text=...) instead."
+        )
+
     logger.info("Gemini URL-first summarization for '%s'...", title[:60])
-    result = _call_gemini(URL_PROMPT.format(
-        url=url,
-        title=title,
-        source_name=source_name,
-    ))
+    try:
+        from google.genai import types
+        client = _get_client()
+        
+        prompt = URL_PROMPT.format(
+            url=url,
+            title=title,
+            source_name=source_name,
+        )
+        full_prompt = f"{SYSTEM_INSTRUCTION}\n\n{prompt}"
+        
+        # Decide if we can use multimodal from_uri (YouTube only)
+        is_youtube = "youtube.com" in url or "youtu.be" in url
+        
+        if is_youtube:
+            response = client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=[
+                    types.Part.from_uri(
+                        file_uri=url,
+                        mime_type="video/mp4"
+                    ),
+                    full_prompt
+                ],
+                config={"temperature": 0.3, "top_p": 0.9}
+            )
+        else:
+            # For non-YouTube, try plain text prompt (Gemini sometimes still works if it has browsing enabled)
+            # or just return None to force Whisper fallback
+            response = client.models.generate_content(
+                model=config.GEMINI_MODEL,
+                contents=full_prompt,
+                config={"temperature": 0.3, "top_p": 0.9}
+            )
+        
+        # Extract text from response
+        result = response.text.strip() if hasattr(response, "text") else ""
+        if not result:
+            # Try candidates fallback
+            if getattr(response, "candidates", None):
+                result = "".join(part.text for part in response.candidates[0].content.parts).strip()
+    except Exception as e:
+        logger.error("Gemini URL-first summarization error: %s", e)
+        return None
 
     if not result:
         logger.warning("Gemini returned nothing for URL: %s", url)
@@ -190,12 +238,16 @@ def summarize_from_url(
 def check_gemini_health() -> bool:
     """Verify the Gemini API key works with a simple ping."""
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
         if not config.GEMINI_API_KEY:
             return False
-        genai.configure(api_key=config.GEMINI_API_KEY)
+        client = genai.Client(
+            api_key=config.GEMINI_API_KEY,
+            http_options=types.HttpOptions(api_version='v1beta')
+        )
         # List models as a lightweight health check
-        models = list(genai.list_models())
+        models = list(client.models.list())
         logger.info("Gemini API OK — %d models available (using %s)", len(models), config.GEMINI_MODEL)
         return True
     except Exception as e:

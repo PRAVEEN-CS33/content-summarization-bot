@@ -1,8 +1,8 @@
 # ── OpenAI ChatGPT API ────────────────────────────────────────────────────────
-openai
+#openai
 
 # ── Google Gemini API ─────────────────────────────────────────────────────────
-google-generativeai
+google-genai
 python-telegram-bot[job-queue]
 
 # ── Scheduling ────────────────────────────────────────────────────────────────

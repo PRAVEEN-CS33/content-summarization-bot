@@ -168,9 +168,10 @@ def save_summary(item_id: int, source_id: int, title: str,
 def get_unsent_summaries() -> List[Dict]:
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT s.*, src.name as source_name, src.type as source_type
+            """SELECT s.*, src.name as source_name, src.type as source_type, i.url as url
                FROM summaries s
                JOIN sources src ON src.id=s.source_id
+               JOIN processed_items i ON i.id=s.item_id
                WHERE s.sent_telegram=0
                ORDER BY s.created_at ASC""",
         ).fetchall()
@@ -188,9 +189,10 @@ def mark_summary_sent(summary_id: int):
 def get_today_summaries() -> List[Dict]:
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT s.*, src.name as source_name, src.type as source_type
+            """SELECT s.*, src.name as source_name, src.type as source_type, i.url as url
                FROM summaries s
                JOIN sources src ON src.id=s.source_id
+               JOIN processed_items i ON i.id=s.item_id
                WHERE date(s.created_at)=date('now')
                ORDER BY s.created_at DESC""",
         ).fetchall()

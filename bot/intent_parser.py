@@ -12,25 +12,21 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_gemini_model = None
+# Lazy-initialized Gemini client
+_gemini_client = None
 
-def _get_model():
-    global _gemini_model
-    if _gemini_model is None:
+def _get_client():
+    global _gemini_client
+    if _gemini_client is None:
         if not config.GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set in your .env file")
-        import google.generativeai as genai
-        genai.configure(api_key=config.GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel(
-            model_name=config.GEMINI_MODEL,
-            system_instruction=SYSTEM_PROMPT,
-            generation_config={
-                "temperature": 0.2,
-                "top_p": 0.9,
-                "max_output_tokens": 200,
-            },
+        from google import genai
+        from google.genai import types
+        _gemini_client = genai.Client(
+            api_key=config.GEMINI_API_KEY,
+            http_options=types.HttpOptions(api_version='v1beta')
         )
-    return _gemini_model
+    return _gemini_client
 
 
 def _build_contents(history: Optional[List[dict]], user_message: str) -> list:
@@ -62,13 +58,24 @@ def _parse_json(raw: str) -> Optional[dict]:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # Try to find JSON block in common formats
         match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            return None
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
+        if match:
+             try:
+                 return json.loads(match.group(0))
+             except json.JSONDecodeError:
+                 pass
+        
+        # If it looks truncated, try to close it (last resort)
+        if raw.startswith("{") and not raw.endswith("}"):
+            try:
+                # Very naive fix for truncated JSON action
+                if '"type":' in raw and '"action":' in raw and '"reply":' not in raw:
+                    raw += ', "reply": "Processing..."}'
+                    return json.loads(raw)
+            except:
+                pass
+        return None
 
 
 SYSTEM_PROMPT = """You are NaradaAI, a smart personal content summarization assistant running on Telegram.
@@ -189,13 +196,24 @@ def parse_intent(user_message: str, history: List[dict] = None) -> dict:
         }
 
     try:
-        model    = _get_model()
+        from google.genai import types
+        client   = _get_client()
         contents = _build_contents(history, user_message)
-        response = model.generate_content(contents)
-        raw      = response.text.strip() if hasattr(response, "text") else ""
+        response = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.1,
+                top_p=0.9,
+                max_output_tokens=1000,
+                response_mime_type="application/json",
+            )
+        )
+        raw      = response.text.strip() if hasattr(response, "text") and response.text else ""
         intent   = _parse_json(raw) if raw else None
         if not intent:
-            raise ValueError("Gemini response was not valid JSON")
+            raise ValueError(f"Gemini response was not valid JSON. Raw text: '{raw}'")
         logger.info("Intent: '%s' → %s", user_message[:60], intent.get("action", intent.get("type")))
         return intent
 

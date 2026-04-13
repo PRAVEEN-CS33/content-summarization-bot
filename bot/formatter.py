@@ -28,39 +28,52 @@ def _esc(text: str) -> str:
 def format_summary_message(summary: dict) -> str:
     """
     Format a single summary record into a Telegram HTML message.
-
-    The LLM already produces the body in the format:
-      [title bold]
-
-      OVERVIEW
-      ...
-
-      SUMMARY
-      ➡️ ...
-
-      SOURCE LINK
-      [link]
-
-    We prepend the source/channel line and append the real URL.
     """
     stype = summary.get("source_type", "default")
     emoji = EMOJI_MAP.get(stype, EMOJI_MAP["default"])
-    label = SOURCE_LABEL.get(stype, stype.capitalize())
     sname = summary.get("source_name", "")
     text  = summary.get("summary_text", "")
     url   = summary.get("url", "")
+    title = summary.get("title", "Untitled")
+
+    text = text.replace("**OVERVIEW**", "<b>OVERVIEW</b>")
+    text = text.replace("**SUMMARY**", "<b>SUMMARY</b>")
+    text = text.replace("**", "")
+
+    # Clean up the output if AI ignored the instructions and included title/link
+    if text.startswith(f"<b>{title}</b>"):
+        text = text[len(f"<b>{title}</b>"):].strip()
+    if text.startswith(title):
+        text = text[len(title):].strip()
+    
+    # Strip everything after <b>SOURCE LINK</b> if it exists
+    if "<b>SOURCE LINK</b>" in text:
+        text = text.split("<b>SOURCE LINK</b>")[0].strip()
+
+    clean_title = title.replace("<b>", "").replace("</b>", "")
+    clean_title = _esc(clean_title)
+
+    if stype == "google_alert":
+        prefix = "🔔 Google Alert"
+    elif stype == "youtube":
+        prefix = "▶️ YouTube"
+    elif stype == "podcast":
+        prefix = "🎙️ Spotify"
+    else:
+        prefix = f"{emoji} {_esc(sname)}"
+
+    header = f"<b>{prefix} - {clean_title}</b>"
 
     lines = [
-        f"{emoji} <b>[{_esc(label)}]</b> {_esc(sname)}",
+        header,
         "",
-        text,  # summary already formatted by LLM (includes title, overview, summary, source link placeholder)
+        text,
     ]
 
-    # Replace the "[link]" placeholder with the real URL if available
     if url:
-        result = "\n".join(lines)
-        result = result.replace("[link]", _esc(url))
-        return result
+        lines.append("")
+        lines.append("<b>SOURCE LINK</b>")
+        lines.append(_esc(url))
 
     return "\n".join(lines)
 
@@ -128,18 +141,46 @@ HOW IT WORKS:
 def format_on_demand_summary(title: str, summary: str, url: str, content_type: str) -> str:
     """Format an on-demand (URL-pasted) summary."""
     emoji = {"youtube": "▶️", "audio": "🎙", "article": "📰"}.get(content_type, "📄")
-    label = {"youtube": "YouTube", "audio": "Podcast/Audio", "article": "Article"}.get(content_type, "Content")
+
+    text = summary
+    text = text.replace("**OVERVIEW**", "<b>OVERVIEW</b>")
+    text = text.replace("**SUMMARY**", "<b>SUMMARY</b>")
+    text = text.replace("**", "")
+    
+    if text.startswith(f"<b>{title}</b>"):
+        text = text[len(f"<b>{title}</b>"):].strip()
+    if text.startswith(title):
+        text = text[len(title):].strip()
+        
+    if "<b>SOURCE LINK</b>" in text:
+        text = text.split("<b>SOURCE LINK</b>")[0].strip()
+
+    clean_title = title.replace("<b>", "").replace("</b>", "")
+    clean_title = _esc(clean_title)
+
+    if content_type == "youtube":
+        prefix = "▶️ YouTube"
+    elif content_type in ("audio", "podcast"):
+        prefix = "🎙️ Spotify"
+    elif content_type == "google_alert":
+        prefix = "🔔 Google Alert"
+    else:
+        prefix = "📄 Article"
+
+    header = f"<b>{prefix} - {clean_title}</b>"
 
     lines = [
-        f"{emoji} <b>[{_esc(label)}] On-Demand Summary</b>",
+        header,
         "",
-        summary,  # Already formatted by LLM with title, overview, summary, source link placeholder
+        text,
     ]
 
-    result = "\n".join(lines)
-    # Replace the "[link]" placeholder with the real URL
-    result = result.replace("[link]", _esc(url))
-    return result
+    if url:
+        lines.append("")
+        lines.append("<b>SOURCE LINK</b>")
+        lines.append(_esc(url))
+
+    return "\n".join(lines)
 
 
 def format_status_message(ollama_ok: bool, pending: int, total_sources: int) -> str:

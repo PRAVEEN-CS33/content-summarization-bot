@@ -90,12 +90,11 @@ async def _fetch_and_summarize_now(update: Update, source_id: int, source_name: 
         parse_mode="HTML"
     )
     for s in source_summaries:
-        await update.message.reply_text(
-            format_summary_message(s), disable_web_page_preview=True, parse_mode="HTML"
-        )
+        msg = format_summary_message(s)
+        await update.message.reply_text(msg, disable_web_page_preview=True, parse_mode="HTML")
         db.mark_summary_sent(s["id"])
 
-    return f"Done! Sent {len(source_summaries)} summaries from {source_name}."
+    return ""
 
 
 # ── Action Executors ──────────────────────────────────────────────────────────
@@ -179,11 +178,10 @@ async def _do_get_summary(update: Update, intent: dict) -> str:
 
     await update.message.reply_text(format_daily_digest_header(len(summaries)), parse_mode="HTML")
     for s in summaries:
-        await update.message.reply_text(
-            format_summary_message(s), disable_web_page_preview=True, parse_mode="HTML"
-        )
+        msg = format_summary_message(s)
+        await update.message.reply_text(msg, disable_web_page_preview=True, parse_mode="HTML")
         db.mark_summary_sent(s["id"])
-    return f"Sent all {len(summaries)} summaries ✓"
+    return ""
 
 
 async def _do_summarize_url(update: Update, intent: dict) -> str:
@@ -207,7 +205,33 @@ async def _do_summarize_url(update: Update, intent: dict) -> str:
     await status_msg.delete()
     formatted = format_on_demand_summary(title, summary, url, content_type)
     await update.message.reply_text(formatted, disable_web_page_preview=True, parse_mode="HTML")
-    return f"Summarized: {title[:60]}"
+
+    # ── Auto-subscribe logic ──────────────────────────────────────────────────
+    try:
+        if url_type == "youtube":
+            res = resolve_youtube_channel(url)
+            if res:
+                _, name, rss_url = res
+                source_id = db.add_source("youtube", name, rss_url, {})
+                if source_id:
+                    await update.message.reply_text(
+                        f"✨ <b>Subscribed!</b> I've added <i>{html.escape(name)}</i> to your list. You'll get its future videos in your daily digest.",
+                        parse_mode="HTML"
+                    )
+        elif url_type == "audio":
+            res = resolve_podcast(url)
+            if res:
+                _, name, rss_url = res
+                source_id = db.add_source("podcast", name, rss_url, {})
+                if source_id:
+                    await update.message.reply_text(
+                        f"✨ <b>Subscribed!</b> I've added <i>{html.escape(name)}</i> to your list. You'll get its future episodes in your daily digest.",
+                        parse_mode="HTML"
+                    )
+    except Exception as e:
+        logger.error("Auto-subscribe failed for %s: %s", url, e)
+
+    return ""
 
 
 async def _do_set_schedule(update: Update, intent: dict) -> str:

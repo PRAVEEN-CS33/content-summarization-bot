@@ -19,8 +19,10 @@ import re
 import logging
 import hashlib
 import time
+import difflib
 import requests
 import feedparser
+from functools import lru_cache
 from typing import Optional, Tuple
 from utils.retry import retry
 import config
@@ -106,17 +108,29 @@ def _scrape_spotify_page(spotify_url: str) -> Tuple[str, str, str]:
 
         # og:title fallback (browser scrape might yield this)
         if not podcast_name:
-            m2 = re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', html)
-            if m2:
-                og = m2.group(1).replace("&amp;", "&").strip()
-                parts = [p.strip() for p in og.split("|")]
-                podcast_name  = parts[1] if len(parts) >= 2 else ""
-                episode_title = parts[0] if len(parts) >= 2 else og
+            try:
+                m2 = re.search(
+                    r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+                    html,
+                )
+                if m2:
+                    og = m2.group(1).replace("&amp;", "&").strip()
+                    parts = [p.strip() for p in og.split("|")]
+                    podcast_name  = parts[1] if len(parts) >= 2 else ""
+                    episode_title = parts[0] if len(parts) >= 2 else og
+            except Exception as e2:
+                logger.debug("og:title regex failed: %s", e2)
 
         # Description
-        m3 = re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']', html)
-        if m3:
-            description = m3.group(1).replace("&amp;", "&").strip()
+        try:
+            m3 = re.search(
+                r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
+                html,
+            )
+            if m3:
+                description = m3.group(1).replace("&amp;", "&").strip()
+        except Exception as e3:
+            logger.debug("description regex failed: %s", e3)
 
         logger.info(
             "Spotify page scraped — show: '%s', episode: '%s'",
@@ -228,6 +242,64 @@ def _strategy_rss_bridge(show_id: str) -> Optional[str]:
     return None
 
 
+# FIXED: Extracted RSS resolution into a standalone cached function.
+# lru_cache keyed by (show_id, show_name) prevents repeat API calls for the
+# same show when multiple episodes from the same podcast are processed.
+@lru_cache(maxsize=256)
+def resolve_rss_feed(show_id: Optional[str], show_name: str) -> Optional[str]:
+    """
+    Multi-strategy RSS URL resolution for a podcast.
+
+    Tries in order: Podcast Index → iTunes → gPodder → RSS bridge.
+    Returns the first successful RSS URL, or None if all strategies fail.
+    Results are cached by (show_id, show_name) to avoid repeat lookups.
+    """
+    attempted = []
+
+    # Strategy 1: Podcast Index (by name)
+    attempted.append("Podcast Index")
+    if show_name:
+        logger.info("Trying Podcast Index for '%s'...", show_name[:50])
+        rss = _strategy_podcast_index(show_name)
+        if rss:
+            return rss
+
+    # Strategy 2: iTunes (by name)
+    attempted.append("iTunes")
+    if show_name:
+        logger.info("Trying iTunes for '%s'...", show_name[:50])
+        rss = _strategy_itunes(show_name)
+        if rss:
+            return rss
+
+    # Strategy 3: gPodder (by name)
+    attempted.append("gPodder")
+    if show_name:
+        logger.info("Trying gPodder for '%s'...", show_name[:50])
+        rss = _strategy_gpodder(show_name)
+        if rss:
+            return rss
+
+    # Strategy 4: RSS bridge (by Spotify show_id)
+    attempted.append("RSS Bridge")
+    if show_id:
+        logger.info("Trying RSS bridge for show_id '%s'...", show_id)
+        rss = _strategy_rss_bridge(show_id)
+        if rss:
+            return rss
+
+    # FIXED: Explicitly return None and log which strategies were attempted.
+    # Previously the function could fall through silently; now callers can
+    # distinguish "truly exhausted all options" from an exception.
+    logger.error(
+        "RSS resolution failed for show='%s' id='%s'. Tried: %s",
+        show_name[:50] if show_name else "(none)",
+        show_id or "(none)",
+        ", ".join(attempted),
+    )
+    return None
+
+
 # ── Main resolver ──────────────────────────────────────────────────────────────
 
 def resolve_spotify(query: str) -> Optional[Tuple[str, str, str]]:
@@ -240,7 +312,6 @@ def resolve_spotify(query: str) -> Optional[Tuple[str, str, str]]:
       3. gPodder         (by show name)
       4. RSS bridge      (by Spotify show_id — pod.co / spotifyrss.com)
     """
-    rss_url = None
     name    = query
     show_id = None
 
@@ -255,8 +326,13 @@ def resolve_spotify(query: str) -> Optional[Tuple[str, str, str]]:
         # For episodes, find the parent show_id embedded in the page HTML
         if content_type == "episode":
             try:
-                resp = requests.get(query, timeout=config.REQUEST_TIMEOUT, headers=HEADERS)
+                # Use BOT_HEADERS for parent show_id extraction; simpler HTML
+                resp = requests.get(query, timeout=config.REQUEST_TIMEOUT, headers=BOT_HEADERS)
+                # Look for /show/ID or spotify:show:ID
                 show_match = re.search(r'spotify\.com/show/([A-Za-z0-9]+)', resp.text)
+                if not show_match:
+                    show_match = re.search(r'spotify:show:([A-Za-z0-9]+)', resp.text)
+
                 if show_match:
                     show_id = show_match.group(1)
                     logger.info("Episode → parent show_id: %s", show_id)
@@ -268,20 +344,11 @@ def resolve_spotify(query: str) -> Optional[Tuple[str, str, str]]:
         if scraped_name:
             name = scraped_name
 
-    # Try strategies in order
-    for label, fn in [
-        ("Podcast Index", lambda: _strategy_podcast_index(name)),
-        ("iTunes",        lambda: _strategy_itunes(name)),
-        ("gPodder",       lambda: _strategy_gpodder(name)),
-        ("RSS bridge",    lambda: _strategy_rss_bridge(show_id) if show_id else None),
-    ]:
-        logger.info("Trying %s for '%s'...", label, name[:50])
-        rss_url = fn()
-        if rss_url:
-            break
+    # FIXED: Delegate to the cached resolve_rss_feed() instead of inlining the
+    # strategy loop here. This allows lru_cache to deduplicate lookups.
+    rss_url = resolve_rss_feed(show_id, name)
 
     if not rss_url:
-        logger.error("Could not resolve RSS for Spotify query: %s", query)
         return None
 
     source_id = f"spotify_{show_id}" if show_id else re.sub(r"[^\w]", "_", name.lower())[:40]
@@ -292,7 +359,14 @@ def resolve_spotify(query: str) -> Optional[Tuple[str, str, str]]:
 # ── MP3 extractor from RSS ─────────────────────────────────────────────────────
 
 def _get_mp3_from_rss(rss_url: str, episode_title: str = "") -> Optional[str]:
-    """Parse RSS feed and return the direct MP3 URL for the matched episode."""
+    """
+    Parse RSS feed and return the direct MP3 URL for the matched episode.
+
+    FIXED: Replaced exact/substring title matching with difflib fuzzy matching
+    (cutoff=0.6) to handle minor title differences between what Spotify shows
+    and what the RSS feed publishes (e.g. extra punctuation, trailing episode
+    numbers, slightly reworded titles).
+    """
     try:
         feed = feedparser.parse(rss_url)
         if not feed.entries:
@@ -306,25 +380,43 @@ def _get_mp3_from_rss(rss_url: str, episode_title: str = "") -> Optional[str]:
                 or href.lower().endswith((".mp3", ".m4a", ".ogg"))
             )
 
-        # Try to match episode by title (normalized comparison)
+        def _audio_url(entry) -> Optional[str]:
+            for enc in getattr(entry, "enclosures", []):
+                if _has_audio(enc):
+                    return enc.get("href") or enc.get("url")
+            return None
+
+        # FIXED: Use difflib fuzzy matching instead of exact substring match.
+        # A cutoff of 0.6 accepts minor spelling/punctuation differences while
+        # still rejecting completely unrelated episodes.
         if episode_title:
-            norm_ep = re.sub(r"[^a-z0-9]", "", episode_title.lower())
-            for entry in feed.entries:
-                norm_entry = re.sub(r"[^a-z0-9]", "", entry.get("title", "").lower())
-                if norm_ep in norm_entry or norm_entry in norm_ep:
-                    for enc in getattr(entry, "enclosures", []):
-                        if _has_audio(enc):
-                            url = enc.get("href") or enc.get("url")
-                            logger.info("Matched episode MP3: %s → %s", entry.get("title", "")[:60], url)
+            norm_ep = re.sub(r"[^a-z0-9\s]", " ", episode_title.lower()).strip()
+            entry_titles = [
+                re.sub(r"[^a-z0-9\s]", " ", entry.get("title", "").lower()).strip()
+                for entry in feed.entries
+            ]
+            matches = difflib.get_close_matches(norm_ep, entry_titles, n=1, cutoff=0.6)
+            if matches:
+                matched_title = matches[0]
+                for entry, norm_entry in zip(feed.entries, entry_titles):
+                    if norm_entry == matched_title:
+                        url = _audio_url(entry)
+                        if url:
+                            logger.info(
+                                "Fuzzy-matched episode MP3: '%s' ≈ '%s' → %s",
+                                episode_title[:60], entry.get("title", "")[:60], url,
+                            )
                             return url
 
         # Fallback: return latest episode's MP3
         for entry in feed.entries[:3]:
-            for enc in getattr(entry, "enclosures", []):
-                if _has_audio(enc):
-                    url = enc.get("href") or enc.get("url")
-                    logger.info("Latest episode MP3 fallback: %s → %s", entry.get("title", "")[:60], url)
-                    return url
+            url = _audio_url(entry)
+            if url:
+                logger.info(
+                    "Latest episode MP3 fallback: %s → %s",
+                    entry.get("title", "")[:60], url,
+                )
+                return url
 
     except Exception as e:
         logger.warning("RSS MP3 extraction failed: %s", e)
@@ -344,7 +436,6 @@ def extract_spotify_audio_url(spotify_url: str) -> str:
     """
     # Step 1: Scrape episode/show info
     podcast_name, episode_title, _ = _scrape_spotify_page(spotify_url)
-    query = podcast_name or episode_title or spotify_url
 
     logger.info("Extracting audio URL for Spotify episode: '%s'", episode_title[:60])
 

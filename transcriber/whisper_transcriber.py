@@ -12,6 +12,7 @@ import re
 import tempfile
 import subprocess
 import asyncio
+import requests
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -205,11 +206,17 @@ def _transcribe_file_sync(audio_path: Path) -> Optional[str]:
             logger.info("Single-pass transcription: %d chars, %.1f min", len(text), info.duration / 60)
             return text
         except Exception as e:
-            logger.error("Transcription failed: %s", e)
-            return None
-    except Exception as e:
-        logger.error("Transcription failed: %s", e)
-        return None
+            logger.warning("VAD filtering failed ('%s'), retrying without VAD...", e)
+            try:
+                segments, info = model.transcribe(
+                    str(audio_path), beam_size=1, vad_filter=False
+                )
+                text = " ".join(seg.text.strip() for seg in segments)
+                logger.info("Single-pass (no VAD): %d chars, %.1f min", len(text), info.duration / 60)
+                return text
+            except Exception as e2:
+                logger.error("Transcription completely failed: %s", e2)
+                return None
 
 
 def _full_pipeline_sync(url: str) -> Optional[str]:
@@ -247,7 +254,11 @@ def transcribe_url(url: str) -> Optional[str]:
     """
     url = normalize_youtube_url(url)
     if is_spotify_url(url):
-        url = extract_spotify_audio_url(url)
+        new_url = extract_spotify_audio_url(url)
+        if new_url == url:
+            logger.error("Could not resolve public RSS/MP3 for Spotify URL: %s. Spotify links require a public RSS feed to be summarized.", url)
+            return None
+        url = new_url
         
     logger.info("Transcribing: %s", url)
     return _full_pipeline_sync(url)
@@ -263,7 +274,11 @@ async def transcribe_url_async(url: str) -> Optional[str]:
     if is_spotify_url(url):
         # resolving RSS needs network requests, do it in a thread safely
         loop = asyncio.get_event_loop()
-        url = await loop.run_in_executor(None, extract_spotify_audio_url, url)
+        new_url = await loop.run_in_executor(None, extract_spotify_audio_url, url)
+        if new_url == url:
+            logger.error("Could not resolve public RSS/MP3 for Spotify URL: %s. Spotify links require a public RSS feed to be summarized.", url)
+            return None
+        url = new_url
         
     logger.info("Async transcribing: %s", url)
     loop = asyncio.get_event_loop()
